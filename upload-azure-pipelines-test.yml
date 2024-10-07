@@ -5,18 +5,18 @@ pool:
 
 variables:
   - name: container
-    value: 'nexus-container'
+    value: ''
   - name: storage_account
-    value: 'nexusdownloads'
+    value: ''
   - name: azureSubscription
-    value: 'ARGOCD_CONNECTION-dxo'
+    value: ''
  
 steps:
 - task: AzureKeyVault@2
   inputs:
-    azureSubscription: 'ARGOCD_CONNECTION-dxo' # Service connection for the Azure subscription containing the Azure Key Vault instance
-    KeyVaultName: 'DXOKeyVault' # Name of the Azure Key Vault instance
-    SecretsFilter: 'SMTP-USERNAME, SMTP-PASSWORD, NexusFunctionalAccountUid, NexusFunctionalAccountPwd' # The secrets that need to be downloaded. '*' indicates all secrets
+    azureSubscription: '' # Service connection for the Azure subscription containing the Azure Key Vault instance
+    KeyVaultName: '' # Name of the Azure Key Vault instance
+    SecretsFilter: * # The secrets that need to be downloaded. '*' indicates all secrets
     RunAsPreJob: false 
 
 - task: Bash@3
@@ -26,15 +26,15 @@ steps:
       #!/bin/bash
 
       ########## Base URL for Nexus Repo ###############
-      base_url="https://nexus.cencora.com/service/rest/v1/components?repository=devsecops_kit"
-      nexus_download_url="https://nexus.cencora.com/repository/devsecops_kit/"
+      base_url="https://base_url"
+      nexus_download_url="https://download_url/"
       checksum_file=checksum.csv
       zip_checksum_file=zip_checksum.csv
       current_date=$(date +'%Y-%m-%dT%H:%M:%S')
       ########## Approved folders (These artifacts will be synced with Nexus) ###############
       included_folders_array=("demo")   
       #included_folders_array=("Azure_Templates" "Reference_Pipelines")   
-      zip_array=("Dot_Net" "Java" "Node_js" "Terraform")
+      zip_array=() #Folders to zip
       final_zip_array=()
       ########################################################################
       
@@ -243,13 +243,13 @@ steps:
         fi
       done
 
-      ########################Uploading File Checksum file to nexus
+      ########################Uploading File Checksum file
       echo "Updating the Checksum file to nexus"
       response_code=$(curl -s -o /dev/null -w "%{http_code}" -u "$(NexusFunctionalAccountUid):$(NexusFunctionalAccountPwd)" -X POST https://nexus.cencora.com/service/rest/v1/components?repository=devsecops_kit -H 'accept: application/json' -H 'application/x-yml' -F "raw.directory=checksum" -F "raw.asset1=@$(Build.SourcesDirectory)/$checksum_file" -F "raw.asset1.filename=$checksum_file")
       echo $response_code
       ####################################################
 
-      ########################Adding Zip Checksum file to nexus
+      ########################Adding Zip Checksum file
       echo "Updating the Zip Checksum file to nexus"
       response_code=$(curl -s -o /dev/null -w "%{http_code}" -u "$(NexusFunctionalAccountUid):$(NexusFunctionalAccountPwd)" -X POST https://nexus.cencora.com/service/rest/v1/components?repository=devsecops_kit -H 'accept: application/json' -H 'application/x-yml' -F "raw.directory=checksum" -F "raw.asset1=@$(Build.SourcesDirectory)/$zip_checksum_file" -F "raw.asset1.filename=$zip_checksum_file")
       echo $response_code
