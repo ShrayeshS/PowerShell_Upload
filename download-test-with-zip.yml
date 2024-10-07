@@ -10,9 +10,9 @@ steps:
   
   - task: AzureKeyVault@2
     inputs:
-      azureSubscription: 'ARGOCD_CONNECTION-dxo' # Service connection for the Azure subscription containing the Azure Key Vault instance
-      KeyVaultName: 'DXOKeyVault' # Name of the Azure Key Vault instance
-      SecretsFilter: 'TENANTID, AZCLIUNAME, AZCLIPWD, SUBSCRIPTION, SMTP-USERNAME, SMTP-PASSWORD' # The secrets that need to be downloaded. '*' indicates all secrets
+      azureSubscription: '' # Service connection for the Azure subscription containing the Azure Key Vault instance
+      KeyVaultName: '' # Name of the Azure Key Vault instance
+      SecretsFilter: * # The secrets that need to be downloaded. '*' indicates all secrets
       RunAsPreJob: false # Runs the task before the job execution begins. Exposes secrets to all tasks in the job, not just tasks that follow this one.
 
   - task: PowerShell@2
@@ -23,7 +23,7 @@ steps:
         Import-Module Az -DisableNameChecking -WarningAction SilentlyContinue
         cd C:\\
         (Get-InstalledModule -Name Az).Version
-        $clientId = "9322bcb0-b7cb-4c0e-a160-821a37602f60"
+        $clientId = "" #Save the client ID in Azure Vault
         $tenantId = "$(TENANTID)"
         $clientSecret = "$(AZCLIPWD)"
         $subscription = "$(SUBSCRIPTION)"
@@ -198,13 +198,11 @@ steps:
 
         
         # Define SMTP server settings
-        $SMTP_SERVER = "smtp-us.ser.proofpoint.com"
+        $SMTP_SERVER = "smtp-us.ser.proofpoint.com" #SMTP Server
         $SMTP_PORT = 587
 
         # Sender and recipient email addresses
-        $FROM = "noreply@cencora.com"
-        #$TO = $env:Build_RequestedForEmail
-        #$TO = "devsecopsteam_ea@amerisourcebergen.com"
+        $FROM = "noreply@gmail.com"
         $TO = $env:to
         if ($env:cc) { $CC = $env:to } else { $null }
         if ($env:bcc) { $BCC = $env:to } else { $null }
@@ -269,7 +267,7 @@ steps:
         # Connect-AzAccount
 
         # Define Key Vault and Secret Name
-        $KeyVaultName = "DXOKeyVault"
+        $KeyVaultName = "" ##Azure KeyVault Name
         $SMTP_USERNAME = "$(SMTP-USERNAME)"
         $SMTP_PASSWORD = "$(SMTP-PASSWORD)"
         $SecretName = "SMTP-PASSWORD"
@@ -316,8 +314,8 @@ steps:
 
          
                   # Set git user email and name
-                  git config --global user.email "shweta.pachbhai@cencora.com"
-                  git config --global user.name "shweta.pachbhai"
+                  git config --global user.email "s.shrayesh@gmail.com"
+                  git config --global user.name "ShrayeshS"
 
                   # Set location to the build sources directory
                   Set-Location -Path ${env:BUILD_SOURCESDIRECTORY}
@@ -392,7 +390,7 @@ steps:
                   }
 
                   # Login to Azure using service principal
-                  $clientId = "9322bcb0-b7cb-4c0e-a160-821a37602f60"
+                  $clientId = "" #Save the client ID in Azure Vault
                   $tenantId = "$(TENANTID)"
                   $clientSecret = "$(AZCLIPWD)"
                   $subscription = "$(SUBSCRIPTION)"
