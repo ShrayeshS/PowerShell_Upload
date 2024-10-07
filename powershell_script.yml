@@ -10,9 +10,9 @@ steps:
   
   - task: AzureKeyVault@2
     inputs:
-      azureSubscription: 'ARGOCD_CONNECTION-dxo' # Service connection for the Azure subscription containing the Azure Key Vault instance
-      KeyVaultName: 'DXOKeyVault' # Name of the Azure Key Vault instance
-      SecretsFilter: 'TENANTID, AZCLIUNAME, AZCLIPWD, SUBSCRIPTION, SMTP-USERNAME, SMTP-PASSWORD' # The secrets that need to be downloaded. '*' indicates all secrets
+      azureSubscription: '' # Service connection for the Azure subscription containing the Azure Key Vault instance
+      KeyVaultName: '' # Name of the Azure Key Vault instance
+      SecretsFilter: * # The secrets that need to be downloaded. '*' indicates all secrets
       RunAsPreJob: false # Runs the task before the job execution begins. Exposes secrets to all tasks in the job, not just tasks that follow this one.
 
   - task: PowerShell@2
@@ -23,7 +23,7 @@ steps:
         Import-Module Az -DisableNameChecking -WarningAction SilentlyContinue
         cd C:\\
         (Get-InstalledModule -Name Az).Version
-        $clientId = "9322bcb0-b7cb-4c0e-a160-821a37602f60"
+        $clientId = "" #Save the client ID in Azure Vault
         $tenantId = "$(TENANTID)"
         $clientSecret = "$(AZCLIPWD)"
         $subscription = "$(SUBSCRIPTION)"
