@@ -14,8 +14,8 @@ steps:
 - task: AzureKeyVault@2
   inputs:
     azureSubscription: ${{ variables.azureSubscription }} # Service connection for the Azure subscription containing the Azure Key Vault instance
-    KeyVaultName: 'DXOKeyVault' # Name of the Azure Key Vault instance
-    SecretsFilter: 'SMTP-USERNAME, SMTP-PASSWORD' # The secrets that need to be downloaded. '*' indicates all secrets
+    KeyVaultName: '' # Name of the Azure Key Vault instance
+    SecretsFilter: * # The secrets that need to be downloaded. '*' indicates all secrets
     RunAsPreJob: false # Runs the task before the job execution begins. Exposes secrets to all tasks in the job, not just tasks that follow this one.
 
 - task: AzureCLI@2
@@ -127,9 +127,9 @@ steps:
     SMTP_PORT=587
 
     # Sender and recipient email addresses
-    FROM="noreply@cencora.com"
-    #TO=$(Build.RequestedForEmail)
-    TO="devsecopsteam_ea@amerisourcebergen.com"
+    FROM="noreply@gmail.com"
+    TO=$(Build.RequestedForEmail)
+
 
     # Email subject
     SUBJECT="DevSecOps Templates"
