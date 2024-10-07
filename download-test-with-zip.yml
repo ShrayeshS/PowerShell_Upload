@@ -1,0 +1,420 @@
+trigger: none
+
+pool:
+  name: 'WindowsAgentPool'  # Choose the appropriate VM image based on your requirements
+
+variables:
+- template: files_to_download_test.yml
+
+steps:
+  
+  - task: AzureKeyVault@2
+    inputs:
+      azureSubscription: 'ARGOCD_CONNECTION-dxo' # Service connection for the Azure subscription containing the Azure Key Vault instance
+      KeyVaultName: 'DXOKeyVault' # Name of the Azure Key Vault instance
+      SecretsFilter: 'TENANTID, AZCLIUNAME, AZCLIPWD, SUBSCRIPTION, SMTP-USERNAME, SMTP-PASSWORD' # The secrets that need to be downloaded. '*' indicates all secrets
+      RunAsPreJob: false # Runs the task before the job execution begins. Exposes secrets to all tasks in the job, not just tasks that follow this one.
+
+  - task: PowerShell@2
+    inputs:
+      targetType: 'inline'
+      script: |
+        $PSDefaultParameterValues['Import-Module:DisableNameChecking'] = $true
+        Import-Module Az -DisableNameChecking -WarningAction SilentlyContinue
+        cd C:\\
+        (Get-InstalledModule -Name Az).Version
+        $clientId = "9322bcb0-b7cb-4c0e-a160-821a37602f60"
+        $tenantId = "$(TENANTID)"
+        $clientSecret = "$(AZCLIPWD)"
+        $subscription = "$(SUBSCRIPTION)"
+
+        if (-not $clientId) {
+          Write-Error "Failed to retrieve clientId from Azure Key Vault."
+          exit 1
+          }
+
+
+        Write-Output "$clientId"
+
+        $SecureStringPassword = ConvertTo-SecureString $clientSecret -AsPlainText -Force
+        $credential = New-Object System.Management.Automation.PSCredential($clientId, $SecureStringPassword)
+
+        Connect-AzAccount -ServicePrincipal -Credential $credential -TenantId $tenantId -SubscriptionId $subscription
+
+        Write-Output "Connected to Azure"
+        Get-AzContext
+
+        ######################################################################
+        function Test-BlobExists {
+          param (
+            [string]$ContainerName,
+            [string]$BlobName,
+            [string]$StorageAccountName
+            )
+    
+          $blob = Get-AzStorageBlob -Container $ContainerName -Context (New-AzStorageContext -StorageAccountName $StorageAccountName) -Blob $BlobName -ErrorAction SilentlyContinue
+
+          if ($?) {
+            return $true
+            } 
+          else {
+            return $false
+            }
+        }
+
+        function Download-FileIfAvailable {
+          if (Test-BlobExists -ContainerName "$(container)" -BlobName "powershellnexus_downloads.csv" -StorageAccountName "$(storage_account)") {
+            Get-AzStorageBlobContent -Container "$(container)" -Context (New-AzStorageContext -StorageAccountName "$(storage_account)") -Blob "nexus_downloads.csv" -Destination "$env:BUILD_SOURCESDIRECTORY\nexus_downloads.csv"
+            Write-Output "File downloaded successfully."
+            } 
+          else {
+            Write-Output "Blob does not exist. Creating a Blank file"
+            Set-Content -Path "$env:BUILD_SOURCESDIRECTORY\powershellnexus_downloads.csv" -Value "Date,Template,Downloaded_by"
+            }
+        }
+
+        Download-FileIfAvailable
+
+        
+
+
+        # Base URL for Nexus Repo
+        $continuationToken = $null
+
+        # Temporary filename to store downloaded chunks
+        $output_file = "$env:BUILD_SOURCESDIRECTORY\temp.txt"
+        $temp_file = "$env:BUILD_SOURCESDIRECTORY\temp1.txt"
+        Remove-Item "$env:BUILD_SOURCESDIRECTORY\temp.txt" -ErrorAction SilentlyContinue
+        Remove-Item "$env:BUILD_SOURCESDIRECTORY\temp1.txt" -ErrorAction SilentlyContinue
+
+        if ($env:reset -eq 1) {
+            Write-Host "Resetting the downloads.csv file"
+            Set-Content -Path "$($env:BUILD_SOURCESDIRECTORY)\downloads.csv" ""
+            Add-Content -Path "$($env:BUILD_SOURCESDIRECTORY)\downloads.csv" "Date,Template,DownloadedBy"
+        } else {
+            Write-Host "Reset is false. Continuing with the script."
+        }
+
+        # Loop until there is no more continuation token
+        #while ($true) {
+        #    if ($continuationToken -eq "null") { Write-Host "Reset is true. Continuing with the script."
+        #    $url = $env:base_url
+        #    Write-Host $url
+        #    } else {  Write-Host "Reset is false. Continuing with the script."
+        ##    $url = "$($env:base_url)&continuationToken=$continuationToken"
+        #    Write-Host $url
+        #    }
+
+        #    $response = Invoke-RestMethod -Uri $url
+
+            # Process response and continue as needed
+        #}
+
+        while ($true) {
+            if ($continuationToken -eq $null) {
+                $url = $env:base_url
+            } else {
+                $url = "$($env:base_url)&continuationToken=$continuationToken"
+                Write-Host "Current URL: $url"
+            }
+    
+            $response = Invoke-WebRequest -Uri $url -UseBasicParsing 2>> "$env:BUILD_SOURCESDIRECTORY\error.log"
+            Write-Host $response
+            if ($?) {
+                Write-Host "Successfully retrieved data from URL: $url"
+                $response.Content | Out-File -Append -FilePath $output_file
+                # Convert response content to JSON and update continuation token   
+                $jsonResponse = ConvertFrom-Json $response.Content
+                $continuationToken = $jsonResponse.continuationToken
+                Write-Host "Continuation Token updated to: $($continuationToken)"
+      
+                if ($continuationToken -eq $null) {
+                    Write-Host "Continuation Token is null. Reached the last page of Nexus HTML view."
+                    break
+                }
+            
+            } else {
+                Write-Host "Error: Web Request to Nexus failed. Check error.log for details."
+                exit 1
+            }
+        } 
+        Select-String -Path $output_file -Pattern "downloadUrl" | Out-File -FilePath $temp_file
+
+        
+        ############ Extracting the url for each nexus asset from the downloaded html page ###########
+
+        $url_array = @() # Initialize an empty array to store URLs
+
+        Get-Content $temp_file | ForEach-Object {
+            $url = [regex]::Matches($_, 'https://[^"]*')[0].Value
+            $url_array += $url
+        }
+
+        # Display or use the URLs stored in the array
+        $url_array
+         
+        ########################################################################
+
+        # Create a directory if not exist
+        New-Item -ItemType Directory -Path "$(BUILD.SOURCESDIRECTORY)\from_nexus" -ErrorAction SilentlyContinue
+        
+        # Retrieve files to download from environment variables
+        $files_content = $env:files_to_download
+        
+        $files_content
+        
+        if (-not [string]::IsNullOrWhiteSpace($files_content)) {
+            $files_to_download_list = $files_content -split " " | ForEach-Object { $_.Trim() }
+            $files_to_download_list
+            # Debug output to track script flow
+            Write-Output "Starting file download process..."
+
+            foreach ($file in $files_to_download_list) {
+                Write-Output "Checking for file: $file"
+
+                # Check if the URL matches the file pattern exactly
+                $url = $url_array | Where-Object { $_ -like "*$file*" }
+                $url
+                if (-not [string]::IsNullOrWhiteSpace($url)) {
+
+                  if ($file -like "*/*") {
+                      $fileName = $file.Replace('/', '_')
+                  } 
+
+                  else {
+                      try {
+                          $fileName = Split-Path -Leaf $url
+                      } 
+                      catch {
+                            Write-Output "Error occurred while extracting filename from URL: $($url)"
+                            continue
+                      }
+                  }
+                  Invoke-WebRequest -Uri $url -OutFile "$(BUILD.SOURCESDIRECTORY)\from_nexus\$fileName"
+                  Write-Output "Downloading file $($fileName) from URL $($url)"
+                }
+            }
+        }
+
+        
+        # Define SMTP server settings
+        $SMTP_SERVER = "smtp-us.ser.proofpoint.com"
+        $SMTP_PORT = 587
+
+        # Sender and recipient email addresses
+        $FROM = "noreply@cencora.com"
+        #$TO = $env:Build_RequestedForEmail
+        #$TO = "devsecopsteam_ea@amerisourcebergen.com"
+        $TO = $env:to
+        if ($env:cc) { $CC = $env:to } else { $null }
+        if ($env:bcc) { $BCC = $env:to } else { $null }
+
+        # Email subject
+        $SUBJECT = "DevSecOps Templates"
+
+        # Inline email body text
+        $INLINE_BODY = "Please find the attached templates"
+
+        $DIRECTORY = "$(BUILD.SOURCESDIRECTORY)/from_nexus"
+
+        Write-Output $env:Build_RequestedForEmail
+        Write-Output "*******************************"
+        
+
+
+        # Iterate over each file in the directory and add them as attachments
+        #$files = Get-ChildItem -Path $DIRECTORY | Select-Object -First 3 | Where-Object { -not $_.PSIsContainer }
+        # $attachments = @()
+        # foreach ($file in $files) {
+         #   Write-Output "Attaching file $($file.FullName)"
+          #  $attachments += "`"$($file.FullName)`""
+            
+            
+        
+        # Get the current date and time
+        $currentDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+        # Get the email of the user who requested the build
+        $requestedForEmail = $env:BUILD_REQUESTEDFOREMAIL
+
+        # Define the path to the CSV file in Artifact Staging Directory
+        $csvFilePath = Join-Path $env:BUILD_SOURCESDIRECTORY "powershellnexus_downloads.csv"
+
+        # Iterate over each file in the directory, process three files, and add their details to CSV
+        #for ($i = 0; $i -lt 3; $i++) {
+        $files = Get-ChildItem -Path $DIRECTORY | Select-Object -First 3 | Where-Object { -not $_.PSIsContainer }
+
+        foreach ($file in $files) {
+            Write-Output "Attaching file $($file.FullName)"
+            $attachments += "`"$($file.FullName)`""
+            # Construct the line to append to the CSV file for each file
+            $lineToAdd = "$currentDate,$($file.FullName),$requestedForEmail"
+                
+            # Append the line to the CSV file
+            Add-Content -Path $csvFilePath -Value $lineToAdd
+            
+        }
+
+
+
+
+
+        # Add closing boundary to end the message
+        #$EMAIL_MESSAGE += "`r`n--boundary123--"
+
+        # Install Azure PowerShell module if not already installed
+        #Install-Module -Name Az -Force -AllowClobber
+
+        # Connect to Azure account (login might be required)
+        # Connect-AzAccount
+
+        # Define Key Vault and Secret Name
+        $KeyVaultName = "DXOKeyVault"
+        $SMTP_USERNAME = "$(SMTP-USERNAME)"
+        $SMTP_PASSWORD = "$(SMTP-PASSWORD)"
+        $SecretName = "SMTP-PASSWORD"
+
+        Write-Host "Retrieving secret from Key Vault: $KeyVaultName, Secret Name: $SecretName"
+
+        # Get Secret Value from Key Vault
+            # Check if SMTP Password is not empty
+            #if (-not [string]::IsNullOrEmpty(${SMTP-PASSWORD})) {
+
+                Write-Host "SMTP Password retrieved successfully."
+
+            
+                # Define SMTP server details
+                $SMTP_SERVER = "smtp-us.ser.proofpoint.com"
+                $SMTP_PORT = 587
+                $SMTP_USERNAME = "$(SMTP-USERNAME)"
+                $SMTP_PASSWORD = "$(SMTP-PASSWORD)" 
+                
+                 # Construct the email message
+                 $emailParams = @{
+                     From       = $FROM
+                     To         = $TO
+                     Cc         = $CC
+                     Bcc        = $BCC
+                     Subject    = "DevSecops Templates"
+                     Body       = "Please find attached documents"
+                     SmtpServer = "smtp-us.ser.proofpoint.com"
+                     Port       = 587
+                     UseSsl     = $true  # Enable SSL/TLS
+                    
+                    # Attachments - Add paths to attachment files here
+                    #Attachments  = @("C:\path\to\attachment1.txt", "C:\path\to\attachment2.pdf")
+                     Attachments = $files | ForEach-Object { $_.FullName }
+                    
+                  }
+                  Try {
+                      # Send the email using Send-MailMessage cmdlet
+                      Send-MailMessage @emailParams -Credential (New-Object System.Management.Automation.PSCredential($SMTP_USERNAME, (ConvertTo-SecureString $SMTP_PASSWORD -AsPlainText -Force)))
+                      Write-Host "Email sent successfully."
+                  } Catch {  
+                      Write-Host "Failed to send email. Error: $_"
+                  }
+
+         
+                  # Set git user email and name
+                  git config --global user.email "shweta.pachbhai@cencora.com"
+                  git config --global user.name "shweta.pachbhai"
+
+                  # Set location to the build sources directory
+                  Set-Location -Path ${env:BUILD_SOURCESDIRECTORY}
+
+                  # Clone the destination repository
+                  git clone $env:destinationRepo
+
+                  $Repo = ($env:destinationRepo -split "_git/")[-1]
+
+                  # Check if the from_nexus directory exists, if not, create it
+                  if (-not (Test-Path "${env:BUILD_SOURCESDIRECTORY}\Repo.LiquiBase\from_nexus")) {
+                      New-Item -ItemType Directory -Path "${env:BUILD_SOURCESDIRECTORY}\Repo.LiquiBase\from_nexus" | Out-Null
+                  } else {
+                      Write-Output "from_nexus directory already exists in Repo"
+                      
+                  }
+
+                  # Ensure the Repo.LiquiBase directory exists
+                  if (-not (Test-Path "${env:BUILD_SOURCESDIRECTORY}\Repo.LiquiBase\from_nexus")) {
+                      New-Item -ItemType Directory -Path "${env:BUILD_SOURCESDIRECTORY}\Repo.LiquiBase\from_nexus" | Out-Null
+                  }
+                  # Copy items from the build sources directory to the from_nexus directory
+                  Copy-Item -Path "${env:BUILD_SOURCESDIRECTORY}\from_nexus\*" -Destination "${env:BUILD_SOURCESDIRECTORY}\Repo.LiquiBase\from_nexus" -Recurse
+
+                 
+                  
+
+                  # Set location to the from_nexus directory
+                  Set-Location -Path "${env:BUILD_SOURCESDIRECTORY}\Repo.LiquiBase\from_nexus"
+
+                  # Create a file list
+                  (Get-ChildItem | Where-Object { -not $_.PSIsContainer -and $_.Name -notmatch '/|^(\..*)$' }).Name | Set-Content "${env:BUILD_SOURCESDIRECTORY}\file_list.txt"
+
+                  # Expand any zip files
+                  foreach ($filename in Get-Content "${env:BUILD_SOURCESDIRECTORY}/file_list.txt") {
+                      if ($filename -like "*.zip") {
+                          Write-Output $filename
+                          $name = [System.IO.Path]::GetFileNameWithoutExtension($filename)
+                          New-Item -ItemType Directory -Path $name | Out-Null
+                          Expand-Archive -Path $filename -DestinationPath $name
+                      }
+                  }
+
+                  # Change directory to the specified location
+                  cd "${env:BUILD_SOURCESDIRECTORY}/Repo.LiquiBase"
+
+                  # Stage all changes in the Git repository
+                  git add .
+
+                  # Commit the staged changes with a message
+                  git commit -m "Copy from devsecops_kit Nexus Repo"
+
+                  # Push the committed changes to the remote repository (origin/main branch)
+                  git push -u origin main
+
+                  # Define variables
+                  $azureSubscription = "${{ variables.azureSubscription }}"
+                  $storageAccount = "${{ variables.storage_account }}"
+                  $container = "${{ variables.container }}"
+                  $filePath = Join-Path $env:BUILD_SOURCESDIRECTORY "powershellnexus_downloads.csv"
+                  
+                  # Check if Azure PowerShell module is already loaded
+                  if (-not (Get-Module -Name Az)) {
+                      # Install Azure PowerShell module if not already installed
+                      if (-not (Get-Module -ListAvailable -Name Az)) {
+                          Install-Module -Name Az -Force -AllowClobber -Scope CurrentUser
+                      }
+
+                  # Import the module
+                  Import-Module Az -DisableNameChecking -WarningAction SilentlyContinue
+
+                  }
+
+                  # Login to Azure using service principal
+                  $clientId = "9322bcb0-b7cb-4c0e-a160-821a37602f60"
+                  $tenantId = "$(TENANTID)"
+                  $clientSecret = "$(AZCLIPWD)"
+                  $subscription = "$(SUBSCRIPTION)"
+
+                  $SecureStringPassword = ConvertTo-SecureString $clientSecret -AsPlainText -Force
+                  $credential = New-Object System.Management.Automation.PSCredential($clientId, $SecureStringPassword)
+
+                  Connect-AzAccount -ServicePrincipal -Credential $credential -TenantId $tenantId -SubscriptionId $subscription
+
+                  Write-Output "Connected to Azure"
+                  Get-AzContext
+
+                  # Create a storage context
+                  $storageContext = New-AzStorageContext -StorageAccountName $storageAccount -UseConnectedAccount
+
+
+                  # Upload the file to the specified container
+                  Set-AzStorageBlobContent -File $filePath -Container $container -Blob "poweshellnexus_downloads.csv" -Context $storageContext -Force
+
+                  Write-Host "File uploaded successfully."
+
+
+
+
+                  

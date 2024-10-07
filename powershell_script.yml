@@ -1,0 +1,58 @@
+trigger: none
+
+pool:
+  name: 'Windows'  # Choose the appropriate VM image based on your requirements
+
+variables:
+- template: files_to_download_test.yml
+
+steps:
+  
+  - task: AzureKeyVault@2
+    inputs:
+      azureSubscription: 'ARGOCD_CONNECTION-dxo' # Service connection for the Azure subscription containing the Azure Key Vault instance
+      KeyVaultName: 'DXOKeyVault' # Name of the Azure Key Vault instance
+      SecretsFilter: 'TENANTID, AZCLIUNAME, AZCLIPWD, SUBSCRIPTION, SMTP-USERNAME, SMTP-PASSWORD' # The secrets that need to be downloaded. '*' indicates all secrets
+      RunAsPreJob: false # Runs the task before the job execution begins. Exposes secrets to all tasks in the job, not just tasks that follow this one.
+
+  - task: PowerShell@2
+    inputs:
+      targetType: 'inline'
+      script: |
+        $PSDefaultParameterValues['Import-Module:DisableNameChecking'] = $true
+        Import-Module Az -DisableNameChecking -WarningAction SilentlyContinue
+        cd C:\\
+        (Get-InstalledModule -Name Az).Version
+        $clientId = "9322bcb0-b7cb-4c0e-a160-821a37602f60"
+        $tenantId = "$(TENANTID)"
+        $clientSecret = "$(AZCLIPWD)"
+        $subscription = "$(SUBSCRIPTION)"
+
+        if (-not $clientId) {
+          Write-Error "Failed to retrieve clientId from Azure Key Vault."
+          exit 1
+          }
+
+
+        Write-Output "$clientId"
+
+        $SecureStringPassword = ConvertTo-SecureString $clientSecret -AsPlainText -Force
+        $credential = New-Object System.Management.Automation.PSCredential($clientId, $SecureStringPassword)
+
+        Connect-AzAccount -ServicePrincipal -Credential $credential -TenantId $tenantId -SubscriptionId $subscription
+
+        Write-Output "Connected to Azure"
+        Get-AzContext
+
+
+  - task: PowerShell@2
+    inputs:
+      targetType: 'inline'
+      script: |
+         Write-Output "TENANTID: $(TENANTID)"    
+         Write-Output "AZCLIUNAME: $(AZCLIUNAME)"    
+         Write-Output "AZCLIPWD: $(AZCLIPWD)"    
+         Write-Output "SUBSCRIPTION: $(SUBSCRIPTION)"   
+         Write-Output "SMTP-USERNAME: $(SMTP-USERNAME)"    
+         Write-Output "SMTP-PASSWORD: $(SMTP-PASSWORD)"
+    displayName: 'Print Secrets'

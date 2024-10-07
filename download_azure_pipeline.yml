@@ -1,0 +1,212 @@
+
+trigger: none
+
+pool:
+  name: 'SonarQube Integration Agent Pool'  # Choose the appropriate VM image based on your requirements
+
+variables:
+- template : files_to_download.yml
+#  files_to_download:                         # List the templates to be downloaded. Mention only the template file name (Minus the nexus path)
+#    Cen_Check_QualityGateStatus.yml
+#    application_variables.yml
+
+steps:
+- task: AzureKeyVault@2
+  inputs:
+    azureSubscription: ${{ variables.azureSubscription }} # Service connection for the Azure subscription containing the Azure Key Vault instance
+    KeyVaultName: 'DXOKeyVault' # Name of the Azure Key Vault instance
+    SecretsFilter: 'SMTP-USERNAME, SMTP-PASSWORD' # The secrets that need to be downloaded. '*' indicates all secrets
+    RunAsPreJob: false # Runs the task before the job execution begins. Exposes secrets to all tasks in the job, not just tasks that follow this one.
+
+- task: AzureCLI@2
+  inputs:
+    azureSubscription: ${{ variables.azureSubscription }}
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      # Function to check if a blob exists in Azure Storage
+      blob_exists() {
+          az storage blob show --container-name ${{ variables.container }} --name downloads.csv --account-name ${{ variables.storage_account }} &> /dev/null
+          return $?
+      }
+
+      # Function to download file from Azure Storage if the blob exists
+      download_file_if_available() {
+          if blob_exists; then
+              az storage blob download --container-name ${{ variables.container }} --account-name ${{ variables.storage_account }} --name downloads.csv --file $(Build.ArtifactStagingDirectory)/downloads.csv
+              echo "File downloaded successfully."
+          else
+              echo "Blob does not exist. Creating a Blank file"
+              >$(Build.ArtifactStagingDirectory)/downloads.csv
+              echo "File_Name,Counter" >$(Build.ArtifactStagingDirectory)/downloads.csv
+          fi
+      }
+
+      download_file_if_available
+
+- script: |
+    #!/bin/bash
+
+    ########## Base URL for Nexus Repo ###############
+    continuationToken="null"
+
+    ########### Temporary filename to store downloaded chunks  ##########
+    output_file="temp.txt"
+    >temp.txt
+    >temp
+    
+    ########################################################################
+    if [ ${{ variables.reset }} -eq 1 ]; then
+      echo "Resetting the downloads.csv file"
+      >$(Build.ArtifactStagingDirectory)downloads.csv
+      echo "Date,Template,DownloadedBy" >$(Build.ArtifactStagingDirectory)/downloads.csv
+    else
+      echo "Reset is false. Continuing with the script."
+      continue;
+    fi
+
+    #########################################################################
+
+    ########### Loop until there is no more continuation token (assuming 'continuationToken' field in response)
+    while true; do
+      if [[ "$continuationToken" == "null" ]]; then
+        url="${{ variables.base_url }}"
+      else
+        url="${{ variables.base_url }}&continuationToken=$continuationToken"
+      fi
+      response=$(curl -s "$url") 2> error.log
+      if [[ -s error.log ]]; then
+        echo "Error: Curl command failed. Check error.log for details."
+        exit 1
+      fi
+      echo $url
+      echo "$response" >> $output_file
+      continuationToken=$(echo $response | jq -r '.continuationToken')
+      echo $continuationToken
+      if [[ "$continuationToken" == "null" ]]; then
+         echo "continuationToken is null - We have reached the last page of nexus html view"
+         break
+      fi
+    done
+    grep "downloadUrl" $output_file > temp
+    ########################################################################
+    
+    ############ Extracting the url for each nexus asset from the downloaded html page ###########
+    while IFS= read -r line; do
+       url=$(echo $line | grep -o '"https[^"]*' | sed 's/"$//' | sed 's/^"//') 
+       echo $url # Run your desired command here
+       url_array+=("$url")
+    done < temp
+    ########################################################################
+    
+    for item in "${url_array[@]}"
+    do
+      echo "$item"
+    done
+    
+    echo "######################################################################"
+
+    #files="$(download_files)"
+    #echo $files
+    for file in ${{ variables.files_to_download }}
+    do
+      for url in "${url_array[@]}"
+      do
+        if [[ $url == *"$file"* ]]; then
+          curl -o "$(Build.ArtifactStagingDirectory)/$(basename $url)" $url
+        fi
+      done
+    done
+  displayName: 'Download Files from Website'
+
+- script: |
+    #!/bin/bash
+
+    # Define SMTP server settings
+    SMTP_SERVER="smtp-us.ser.proofpoint.com"
+    SMTP_PORT=587
+
+    # Sender and recipient email addresses
+    FROM="noreply@cencora.com"
+    #TO=$(Build.RequestedForEmail)
+    TO="devsecopsteam_ea@amerisourcebergen.com"
+
+    # Email subject
+    SUBJECT="DevSecOps Templates"
+
+    # Inline email body text
+    INLINE_BODY="Please find the attached templates"
+
+    DIRECTORY=$(Build.ArtifactStagingDirectory)
+
+    ##################################################
+    echo $(Build.RequestedForEmail)
+    echo "*******************************"
+    # Construct the initial part of the email message
+    EMAIL_MESSAGE=$(echo -e "From: $FROM\r\nTo: $TO\r\nSubject: $SUBJECT\r\nContent-Type: multipart/mixed; boundary=boundary123\r\n\r\n--boundary123")
+
+    # Iterate over each file in the directory and add them as attachments
+    for ATTACHMENT_FILE in "$DIRECTORY"/*; do
+        if [ -f "$ATTACHMENT_FILE" ] && [ "$(basename "$ATTACHMENT_FILE")" != "downloads.csv" ]; then
+                echo "$ATTACHMENT_FILE"
+                FILE_CONTENT=$(base64 "$ATTACHMENT_FILE")
+                FILE_NAME=$(basename "$ATTACHMENT_FILE")
+                echo "$(date)",$FILE_NAME,$(Build.RequestedForEmail) >>$(Build.ArtifactStagingDirectory)/downloads.csv
+                EMAIL_MESSAGE+="\r\n--boundary123\r\nContent-Type: application/octet-stream; name=\"$FILE_NAME\"\r\nContent-Disposition: attachment; filename=\"$FILE_NAME\"\r\nContent-Transfer-Encoding: base64\r\n\r\n$FILE_CONTENT"
+                
+                #row_number=$(grep "^$FILE_NAME," "$(Build.ArtifactStagingDirectory)/counter.csv")
+                #row_numbers=$(grep -n "^$FILE_NAME," "$(Build.ArtifactStagingDirectory)/counter.csv" | sed 's/\(.*\):.*/\1/')
+                #echo $row_number
+                # Check if the name already exists in the CSV file
+                #if [ -n "$row_number" ]; then
+                # Name exists, so update only its age
+                  #row_number=$(awk -v search="$FILE_NAME" -F',' '$1 == search {print NR; exit}' counter.csv)
+                  #COUNTER=$(awk -F',' -v row=$row_number 'NR == row {print $2}' "$(Build.ArtifactStagingDirectory)/counter.csv")
+                  #COUNTER=COUNTER+1
+                  #awk -v name="$FILE_NAME" -v counter="$COUNTER" 'BEGIN {FS=OFS=","} $1 == name { $2 = counter } 1' "$(Build.ArtifactStagingDirectory)/counter.csv" > tmpfile && mv tmpfile "$(Build.ArtifactStagingDirectory)/counter.csv"
+
+                  #echo "Updated $FILE_NAME's counter to $COUNTER"
+                #else
+                  #COUNTER=0
+                # Name doesn't exist, so add a new entry with this name and age
+                  #echo "$FILE_NAME,$COUNTER" >> $(Build.ArtifactStagingDirectory)/counter.csv
+
+                  #echo "$FILE_NAME not found in counter file. Added $FILE_NAME"
+                #fi
+        fi
+    done
+
+    # Add closing boundary to end the message
+    EMAIL_MESSAGE+="\r\n--boundary123--"
+    ##################################################
+    
+    # Send the email with attachment and inline body using curl command over SMTPS (SMTP with SSL/TLS)
+    curl --url "smtp://$SMTP_SERVER:$SMTP_PORT" --ssl-reqd \
+      --mail-from "$FROM" --mail-rcpt "$TO" \
+      --user "$(SMTP-USERNAME):$(SMTP-PASSWORD)" \
+      --upload-file - <<<$(echo -e "$EMAIL_MESSAGE")
+    
+    echo "Email sent successfully."
+    #cp counter.csv $(Build.ArtifactStagingDirectory)
+
+
+- task: PublishPipelineArtifact@1
+  inputs:
+    targetPath: '$(Build.ArtifactStagingDirectory)' # Folder containing downloaded files
+    artifact: 'websitefiles' # Artifact name to publish
+
+
+- task: AzureCLI@2
+  inputs:
+    azureSubscription: ${{ variables.azureSubscription }}
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      az storage blob upload \
+          --account-name ${{ variables.storage_account }} \
+          --container-name ${{ variables.container }} \
+          --name downloads.csv \
+          --file downloads.csv \
+          --auth-mode login \
+          --overwrite true
+    workingDirectory: '$(Build.ArtifactStagingDirectory)'

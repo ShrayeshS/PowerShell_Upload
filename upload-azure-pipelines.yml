@@ -1,0 +1,123 @@
+trigger: none # Define the branch to trigger the pipeline
+
+pool:
+  name: 'SonarQube Integration Agent Pool'  # Choose the appropriate VM image based on your requirements
+
+steps:
+- task: AzureKeyVault@2
+  inputs:
+    azureSubscription: 'ARGOCD_CONNECTION-dxo' # Service connection for the Azure subscription containing the Azure Key Vault instance
+    KeyVaultName: 'DXOKeyVault' # Name of the Azure Key Vault instance
+    SecretsFilter: 'NexusFunctionalAccountUid, NexusFunctionalAccountPwd' # The secrets that need to be downloaded. '*' indicates all secrets
+    RunAsPreJob: false 
+
+- task: Bash@3
+  inputs:
+    targetType: 'inline'
+    script: |
+      ########## Base URL for Nexus Repo ###############
+      base_url="https://nexus.cencora.com/service/rest/v1/components?repository=devsecops_kit"
+      
+      ########## Approved folders (These artifacts will be synced with Nexus) ###############
+      included_folders_array=("Azure_Templates" "Reference_Pipelines" "demo")   
+      ########################################################################
+      
+      set -e
+    
+      ##########Extract the immediate subdirectories under the Approved folder ##########
+      #while IFS= read -r -d $'\0' included_folders; do
+      #  included_folders_array+=("$(echo "$included_folders" | sed 's|^./Approved/||')")
+      #done < <(find ./Approved/ -mindepth 1 -maxdepth 1 -type d -print0)
+      ########################################################################
+      
+      for element in "${included_folders_array[@]}"
+      do
+        echo "$element"
+      done
+
+      ########### Temporary filename to store downloaded chunks  ##########
+      output_file="temp.txt"
+      >temp.txt
+      >temp
+      continuationToken="null"
+
+      ########### Loop until there is no more continuation token (assuming 'continuationToken' field in response)
+      while true; do
+        if [[ "$continuationToken" == "null" ]]; then
+                url="$base_url"
+        else
+                url="$base_url&continuationToken=$continuationToken"
+        fi
+        response=$(curl -s "$url") 2> error.log
+        if [[ -s error.log ]]; then
+          echo "Error: Curl command failed. Check error.log for details."
+          exit 1
+        fi
+        echo $url
+        echo "$response" >> $output_file
+        continuationToken=$(echo $response | jq -r '.continuationToken')
+        echo $continuationToken
+        if [[ "$continuationToken" == "null" ]]; then
+                echo "continuationToken is null - We have reached the last page of nexus html view"
+                break
+        fi
+      done
+      grep "downloadUrl" $output_file > temp
+      ########################################################################
+      
+      ############ Extracting the url for each nexus asset from the downloaded html page ###########
+      while IFS= read -r line; do
+        url=$(echo $line | grep -o '"https[^"]*' | sed 's/"$//' | sed 's/^"//') 
+        echo $url # Run your desired command here
+        url_array+=("$url")
+      done < temp
+      ########################################################################
+   
+      ############ Deleting the files from Nexus Repo under the included_folders
+      echo "########### Deleting files from Nexus Repo ###############"
+      for item in "${url_array[@]}"
+      do
+        for folder in "${included_folders_array[@]}"
+        do
+          if [[ "$item" == *"$folder"* ]]; then
+            echo "$item"
+            response_code=$(curl -s -o /dev/null -w "%{http_code}" -u "$(NexusFunctionalAccountUid):$(NexusFunctionalAccountPwd)" --request DELETE $item )
+            echo "Response code: $response_code"
+          fi
+        done
+      echo "---------"
+      done
+      >temp
+      ########################################################################
+
+      ########### Adding the Approved files from Azure Repo to Nexus ###########
+      echo "########### Adding files to Nexus Repo ###############"
+      find . -type f > temp 
+      while IFS= read -r line; do
+        #echo "LINE"
+        #echo $line
+        #echo "------------"
+        #echo "DIR"
+        directory=$(dirname $line)
+        #echo $directory
+        #echo "-----------"
+        base_file_name=$(basename $line)
+        #echo "BASE"
+        #echo $base_file_name
+        #echo "------"
+        raw_name=$( echo $directory | sed -n 's|^./Approved/||p')
+        #echo $raw_name
+        #echo "RAW"
+        #echo "------------"
+        if [[  $line == *"Approved"* ]]; then
+            echo $line
+            response_code=$(curl -s -o /dev/null -w "%{http_code}" -u "$(NexusFunctionalAccountUid):$(NexusFunctionalAccountPwd)" -X POST https://nexus.cencora.com/service/rest/v1/components?repository=devsecops_kit -H 'accept: application/json' -H 'application/x-yml' -F "raw.directory=$raw_name" -F "raw.asset1=@$(Build.SourcesDirectory)/Approved/$raw_name/$base_file_name" -F "raw.asset1.filename=$base_file_name")
+            # Extract HTTP status code from verbose output
+            #http_status_code=$(echo "$curl_output")
+            #echo "HTTP Status Code: $http_status_code"
+            echo $response_code
+            echo "-------------"
+            
+        fi
+      done < temp
+      ###############################################################################

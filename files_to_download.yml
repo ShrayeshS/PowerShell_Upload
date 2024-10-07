@@ -1,0 +1,11 @@
+variables:
+  base_url: https://nexus.cencora.com/service/rest/v1/components?repository=devsecops_kit #Nexus base URL
+  reset: 0                                   # 1 indicates the downloads.csv is truncated essentially resetting it. 0 indicates no action needed on downloads.csv file
+  container: infradxocontainer               # Destination Container Name for downloads.csv
+  storage_account: infradxostorage           # Destination Storage Account Name for downloads.csv
+  azureSubscription: ARGOCD_CONNECTION-dxo   # Service Connection to the Azure Blob
+
+########################################################################################################################################
+
+  files_to_download: 
+    Cen_Check_QualityGateStatus.yml

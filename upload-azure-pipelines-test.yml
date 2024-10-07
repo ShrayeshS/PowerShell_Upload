@@ -1,0 +1,256 @@
+trigger: none # Define the branch to trigger the pipeline
+
+pool:
+  name: 'SonarQube Integration Agent Pool'  # Choose the appropriate VM image based on your requirements
+
+variables:
+  - name: container
+    value: 'nexus-container'
+  - name: storage_account
+    value: 'nexusdownloads'
+  - name: azureSubscription
+    value: 'ARGOCD_CONNECTION-dxo'
+ 
+steps:
+- task: AzureKeyVault@2
+  inputs:
+    azureSubscription: 'ARGOCD_CONNECTION-dxo' # Service connection for the Azure subscription containing the Azure Key Vault instance
+    KeyVaultName: 'DXOKeyVault' # Name of the Azure Key Vault instance
+    SecretsFilter: 'SMTP-USERNAME, SMTP-PASSWORD, NexusFunctionalAccountUid, NexusFunctionalAccountPwd' # The secrets that need to be downloaded. '*' indicates all secrets
+    RunAsPreJob: false 
+
+- task: Bash@3
+  inputs:
+    targetType: 'inline'
+    script: |
+      #!/bin/bash
+
+      ########## Base URL for Nexus Repo ###############
+      base_url="https://nexus.cencora.com/service/rest/v1/components?repository=devsecops_kit"
+      nexus_download_url="https://nexus.cencora.com/repository/devsecops_kit/"
+      checksum_file=checksum.csv
+      zip_checksum_file=zip_checksum.csv
+      current_date=$(date +'%Y-%m-%dT%H:%M:%S')
+      ########## Approved folders (These artifacts will be synced with Nexus) ###############
+      included_folders_array=("demo")   
+      #included_folders_array=("Azure_Templates" "Reference_Pipelines")   
+      zip_array=("Dot_Net" "Java" "Node_js" "Terraform")
+      final_zip_array=()
+      ########################################################################
+      
+      set -e
+
+      ########### Temporary filename to store downloaded chunks  ##########
+      output_file="temp.txt"
+      >temp.txt
+      >temp
+      continuationToken="null"
+
+      ########### Loop until there is no more continuation token (assuming 'continuationToken' field in response)
+      while true; do
+        if [[ "$continuationToken" == "null" ]]; then
+                url="$base_url"
+        else
+                url="$base_url&continuationToken=$continuationToken"
+        fi
+        response=$(curl -s "$url") 2> error.log
+        if [[ -s error.log ]]; then
+          echo "Error: Curl command failed. Check error.log for details."
+          exit 1
+        fi
+        echo $url
+        echo "$response" >> $output_file
+        continuationToken=$(echo $response | jq -r '.continuationToken')
+        echo $continuationToken
+        if [[ "$continuationToken" == "null" ]]; then
+                echo "continuationToken is null - We have reached the last page of nexus html view"
+                break
+        fi
+      done
+      grep "downloadUrl" $output_file > temp
+      ########################################################################
+      
+      ############ Extracting the url for each nexus asset from the downloaded html page ###########
+      while IFS= read -r line; do
+        url=$(echo $line | grep -o '"https[^"]*' | sed 's/"$//' | sed 's/^"//') 
+        echo $url # Run your desired command here
+        url_array+=("$url")
+      done < temp
+
+      ########################################################################
+   
+      ############ Create checksum file
+      checksum_exists=0
+      zip_checksum_exists=0
+      if [ ! -d "$(Build.SourcesDirectory)/ZipFiles" ] ; then mkdir -p "$(Build.SourcesDirectory)/ZipFiles"; fi
+      for item in "${url_array[@]}"
+      do
+        if [[ "$item" == */checksum* ]] ; then
+          checksum_exists=1
+          curl -o "$(Build.SourcesDirectory)/$(basename $item)" $item
+          echo "Downloading the Checksum file"
+        fi
+        if [[ "$item" == */zip_checksum* ]] ; then
+          zip_checksum_exists=1
+          curl -o "$(Build.SourcesDirectory)/$(basename $item)" $item
+          echo "Downloading the Checksum file"
+        fi
+        if [[ "$item" == *.zip* ]] ; then
+          curl -o "$(Build.SourcesDirectory)/ZipFiles/$(basename $item)" $item
+          echo "Downloading the Zip file"
+        fi
+      done
+      if [[ $checksum_exists == 0 ]]; then
+        echo "File Checksum file not found in nexus. Creating a File blank file"
+        echo "Download_url, Folder, FileName, Checksum, Date" >$(Build.SourcesDirectory)/$checksum_file
+      fi
+      if [[ $zip_checksum_exists == 0 ]]; then
+        echo "Zip Checksum file not found in nexus. Creating a Zip Checksum blank file"
+        echo "Download_url, FileName, Checksum, Date" >$(Build.SourcesDirectory)/$zip_checksum_file
+      fi
+      echo $checksum_exists
+      echo $zip_checksum_exists
+      ########################################################################
+
+      ###############
+      find . \( -path "*/Approved/*" \) -type f > local_file_list.csv
+      while IFS= read new_line; do
+        new_directory=$(dirname $new_line)
+        new_base_file_name=$(basename $new_line)
+        new_raw_name=$( echo $new_directory | sed -n 's|^./Approved/||p')
+        if [[ "$new_raw_name" == 'Reference_Pipelines'* ]]; then 
+          new_raw_name_for_file="Reference_Pipelines"
+        else
+          new_raw_name_for_file=$( echo "$new_raw_name" | awk -F'/' '{print $2}')
+        fi
+        echo $new_raw_name_for_file
+        download_name=$( echo $new_line | sed -n 's|^./Approved/||p')
+        download_url="$nexus_download_url$download_name"
+        found=0
+        # Iterate over the array elements and check for the variable
+        for element in "${included_folders_array[@]}"; do
+          if [[ "$new_line" == *"$element"* ]]; then  
+            found=1  #Every file in the included folders array AzureTemplates and Pipeline
+            break  # Exit loop once found
+          fi
+        done
+        if [ $found -eq 1 ]; then  #Every file in the included folders array
+          echo "$download_url" 
+          if ! grep -q "^$download_url," $(Build.SourcesDirectory)/$checksum_file ; then    # filname name not in checksum file
+            new_checksum=$(md5sum $(Build.SourcesDirectory)/$new_line | awk '{print $1}')
+            echo "$download_url, $new_raw_name_for_file, $new_base_file_name, $new_checksum, $current_date" >> $(Build.SourcesDirectory)/$checksum_file
+            response_code=$(curl -s -o /dev/null -w "%{http_code}" -u "$(NexusFunctionalAccountUid):$(NexusFunctionalAccountPwd)" -X POST https://nexus.cencora.com/service/rest/v1/components?repository=devsecops_kit -H 'accept: application/json' -H 'application/x-yml' -F "raw.directory=$new_raw_name" -F "raw.asset1=@$(Build.SourcesDirectory)/Approved/$new_raw_name/$new_base_file_name" -F "raw.asset1.filename=$new_base_file_name")
+            echo "Appended checksum for new file: $new_base_file_name"
+            for z in "${zip_array[@]}"; do
+              if [[ "$new_line" == *"$z"* ]]; then
+                to_zip=1
+                #zip -r $element.zip $element/*i
+                if [[ ! " ${final_zip_array[*]} " =~ " $z " ]]; then
+                  # Add the new element to the array
+                  final_zip_array+=("$z")
+                  echo "Element '$z' added to the array."
+                else
+                  echo "Element '$z' already exists in the array."
+                fi
+                break  # Exit loop once found
+              fi
+            done
+          else
+            while IFS=',' read -r download_url_csv folder_csv filename_csv checksum_csv date_csv ; do     #File is existing checking for checksum
+              filename_csv=$(echo "$filename_csv" | tr -d '[:space:]')
+              checksum_csv=$(echo "$checksum_csv" | tr -d '[:space:]')
+              date_csv=$(echo "$date_csv" | tr -d '[:space:]')
+              folder_csv=$(echo "$folder_csv" | tr -d '[:space:]')
+              download_url_csv=$(echo "$download_url_csv" | tr -d '[:space:]')
+              #echo "$new_base_file_name already existing"
+              new_checksum=$(md5sum $(Build.SourcesDirectory)/$new_line | awk '{print $1}')
+
+              if [[ "$download_url_csv" == "$download_url" ]]; then
+                if [[ "$checksum_csv" != "$new_checksum" ]]; then     
+                  echo "$download_url_csv,$folder_csv,$filename_csv,$checksum_csv,$date_csv"   #If checksum is not same
+                  echo "$download_url,$new_raw_name_for_file,$new_base_file_name,$new_checksum,$current_date"
+                  #echo "*****************"
+                  escaped_download_url_csv=$(echo "$download_url_csv" | sed 's/[\/&]/\\&/g')
+                  escaped_download_url=$(echo "$download_url" | sed 's/[\/&]/\\&/g')
+                  escaped_date_csv=$(echo "$date_csv" | sed 's/[\/&]/\\&/g')
+                  escaped_current_date=$(echo "$current_date" | sed 's/[\/&]/\\&/g')
+                  echo "reached"
+                  echo "$escaped_download_url_csv, $folder_csv, $filename_csv, $checksum_csv, $escaped_date_csv"
+                  echo "$escaped_download_url, $new_raw_name_for_file, $new_base_file_name, $new_checksum, $escaped_current_date"
+                  sed -i "s|^$escaped_download_url_csv, $folder_csv, $filename_csv, $checksum_csv, $escaped_date_csv$|$escaped_download_url, $new_raw_name_for_file, $new_base_file_name, $new_checksum, $escaped_current_date|g" $(Build.SourcesDirectory)/$checksum_file
+                  response_code=$(curl -s -o /dev/null -w "%{http_code}" -u "$(NexusFunctionalAccountUid):$(NexusFunctionalAccountPwd)" -X POST https://nexus.cencora.com/service/rest/v1/components?repository=devsecops_kit -H 'accept: application/json' -H 'application/x-yml' -F "raw.directory=$new_raw_name" -F "raw.asset1=@$(Build.SourcesDirectory)/Approved/$new_raw_name/$new_base_file_name" -F "raw.asset1.filename=$new_base_file_name")     
+                  for z in "${zip_array[@]}"; do
+                    if [[ "$new_line" == *"$z"* ]]; then
+                      to_zip=1
+                      #zip -r $element.zip $element/*i
+                      if [[ ! "${final_zip_array[*]}" =~ "$z" ]]; then
+                        # Add the new element to the array
+                        final_zip_array+=("$z")
+                        echo "Element '$z' added to the array."
+                      else
+                        echo "Element '$z' already exists in the array."
+                      fi
+                      break  # Exit loop once found
+                    fi
+                  done          
+                fi
+              fi
+            done < $(Build.SourcesDirectory)/$checksum_file
+          fi
+        fi
+      done < $(Build.SourcesDirectory)/local_file_list.csv
+
+      echo "Checksum verification and update complete."
+
+      
+      ####################################################
+      echo "Final zip Folders"
+      folder_path="ZipFiles"
+      #if [ ! -d "$folder_path" ] ; then mkdir -p "$folder_path"; fi
+      files=($(find "$(Build.SourcesDirectory)/$folder_path" -maxdepth 1 -type f 2>/dev/null))
+      for item in "${final_zip_array[@]}" ; do
+        echo "$item"
+        if [ ${#files[@]} -eq 0 ]; then
+          echo "No files found in the Zip folder."
+          version_number="v1"
+          zip -r "$(Build.SourcesDirectory)/$folder_path/${item}_${version_number}.zip" "./Approved/demo/$item"
+          zip_checksum=$(md5sum $(Build.SourcesDirectory)/$folder_path/${item}_${version_number}.zip | awk '{print $1}')
+          echo "$nexus_download_url/ZipFiles/${item}_${version_number}.zip, ${item}_${version_number}.zip, $zip_checksum, $current_date" >> $(Build.SourcesDirectory)/$zip_checksum_file
+          response_code=$(curl -s -o /dev/null -w "%{http_code}" -u "$(NexusFunctionalAccountUid):$(NexusFunctionalAccountPwd)" -X POST https://nexus.cencora.com/service/rest/v1/components?repository=devsecops_kit -H 'accept: application/json' -H 'application/x-yml' -F "raw.directory=$folder_path" -F "raw.asset1=@$(Build.SourcesDirectory)/$folder_path/${item}_${version_number}.zip" -F "raw.asset1.filename=${item}_${version_number}.zip")
+          echo "Appended checksum for new file: ${item}_${version_number}.zip"
+          echo "Folder Zipped $item"
+        else
+          latest_version=0
+          zip_list=($(find "$(Build.SourcesDirectory)/$folder_path" -maxdepth 1 -type f -name *"$item"* 2>/dev/null))
+          for zip_file in "${zip_list[@]}"; do
+            echo $zip_file, $item
+            #version=$(echo "$zip_file" | grep -oP '_[vV]\d+' | sed 's/[^0-9]*//g' | sort -nr | head -n 1)
+            version=$(echo "$zip_file" | grep -oP "${item}_v\K\d+")
+            echo "**********$version"
+            version_as_int=`expr $version + 0`
+            if [ "$version_as_int" -gt "$latest_version" ] ; then
+              latest_version=$((version_as_int + 0))
+            fi
+          done
+            latest_version=$((latest_version + 1))
+            echo "Latest Version $latest_version"
+            zip -r "$(Build.SourcesDirectory)/$folder_path/${item}_v${latest_version}.zip" "./Approved/demo/$item"
+            zip_checksum=$(md5sum $(Build.SourcesDirectory)/$folder_path/${item}_v${latest_version}.zip | awk '{print $1}')
+            echo "$nexus_download_url/ZipFiles/${item}_v${latest_version}.zip, ${item}_v${latest_version}.zip, $zip_checksum, $current_date" >> $(Build.SourcesDirectory)/$zip_checksum_file
+            response_code=$(curl -s -o /dev/null -w "%{http_code}" -u "$(NexusFunctionalAccountUid):$(NexusFunctionalAccountPwd)" -X POST https://nexus.cencora.com/service/rest/v1/components?repository=devsecops_kit -H 'accept: application/json' -H 'application/x-yml' -F "raw.directory=$folder_path" -F "raw.asset1=@$(Build.SourcesDirectory)/$folder_path/${item}_v${latest_version}.zip" -F "raw.asset1.filename=${item}_v${latest_version}.zip")
+            echo "Appended checksum for new file: ${item}_v${latest_version}.zip"
+            echo "Folder Zipped $item"
+        fi
+      done
+
+      ########################Uploading File Checksum file to nexus
+      echo "Updating the Checksum file to nexus"
+      response_code=$(curl -s -o /dev/null -w "%{http_code}" -u "$(NexusFunctionalAccountUid):$(NexusFunctionalAccountPwd)" -X POST https://nexus.cencora.com/service/rest/v1/components?repository=devsecops_kit -H 'accept: application/json' -H 'application/x-yml' -F "raw.directory=checksum" -F "raw.asset1=@$(Build.SourcesDirectory)/$checksum_file" -F "raw.asset1.filename=$checksum_file")
+      echo $response_code
+      ####################################################
+
+      ########################Adding Zip Checksum file to nexus
+      echo "Updating the Zip Checksum file to nexus"
+      response_code=$(curl -s -o /dev/null -w "%{http_code}" -u "$(NexusFunctionalAccountUid):$(NexusFunctionalAccountPwd)" -X POST https://nexus.cencora.com/service/rest/v1/components?repository=devsecops_kit -H 'accept: application/json' -H 'application/x-yml' -F "raw.directory=checksum" -F "raw.asset1=@$(Build.SourcesDirectory)/$zip_checksum_file" -F "raw.asset1.filename=$zip_checksum_file")
+      echo $response_code
+      ####################################################
