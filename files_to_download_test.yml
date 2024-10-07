@@ -1,17 +1,15 @@
 variables:
-  base_url: https://nexus.cencora.com/service/rest/v1/components?repository=devsecops_kit
-  destinationRepo: https://dev.azure.com/abcdxo/dxo/_git/Repo.LiquiBase
+  base_url: https:/base_url
+  destinationRepo: https://GH_Repo
   reset: 0                                   # 1 indicates the nexus_downloads.csv is truncated essentially resetting it. 0 indicates no action needed on downloads.csv file
-  container: infradxocontainer               # Destination Container Name for downloads.csv
-  storage_account: infradxostorage           # Destination Storage Account Name for downloads.csv
-  azureSubscription: ARGOCD_CONNECTION-dxo   # Service Connection to the Azure Blob
+  container:                # Destination Container Name for downloads.csv
+  storage_account:            # Destination Storage Account Name for downloads.csv
+  azureSubscription:   # Service Connection to the Azure Blob
   
 ########################################################################################################################################
-  to: "shweta.pachbhai@cencora.com"          # Mandatory
-  cc: "shweta.pachbhai@cencora.com"                                   # Optional
-  bcc: "shweta.pachbhai@cencora.com"         # Optional
+  to: ""          # Mandatory
+  cc: null                                   # Optional
+  bcc: null         # Optional
 ########################################################################################################################################  
   files_to_download: 
-    cen_QualityGate_Status.yml
-    Terraform_v1.zip
-    Terraform/Modules/Kubernetes_Secretes/main.tf
+    file.yml
