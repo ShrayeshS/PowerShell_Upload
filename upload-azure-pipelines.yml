@@ -6,9 +6,9 @@ pool:
 steps:
 - task: AzureKeyVault@2
   inputs:
-    azureSubscription: 'ARGOCD_CONNECTION-dxo' # Service connection for the Azure subscription containing the Azure Key Vault instance
-    KeyVaultName: 'DXOKeyVault' # Name of the Azure Key Vault instance
-    SecretsFilter: 'NexusFunctionalAccountUid, NexusFunctionalAccountPwd' # The secrets that need to be downloaded. '*' indicates all secrets
+    azureSubscription: '' # Service connection for the Azure subscription containing the Azure Key Vault instance
+    KeyVaultName: '' # Name of the Azure Key Vault instance
+    SecretsFilter: * # The secrets that need to be downloaded. '*' indicates all secrets
     RunAsPreJob: false 
 
 - task: Bash@3
@@ -16,7 +16,7 @@ steps:
     targetType: 'inline'
     script: |
       ########## Base URL for Nexus Repo ###############
-      base_url="https://nexus.cencora.com/service/rest/v1/components?repository=devsecops_kit"
+      base_url="https://base_url"
       
       ########## Approved folders (These artifacts will be synced with Nexus) ###############
       included_folders_array=("Azure_Templates" "Reference_Pipelines" "demo")   
